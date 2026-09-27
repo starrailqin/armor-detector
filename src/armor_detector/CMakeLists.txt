@@ -7,9 +7,28 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(aim_interfaces REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
+set(ONNXRUNTIME_DIR "$ENV{HOME}/onnxruntime-linux-x64-1.24.4")
+set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_DIR}/include")
+set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_DIR}/lib")
+
+if(NOT EXISTS "${ONNXRUNTIME_DIR}")
+    message(FATAL_ERROR "ONNX Runtime not found at ${ONNXRUNTIME_DIR}")
+endif()
+
+
+include_directories(${ONNXRUNTIME_INCLUDE_DIR})
+
+link_directories(${ONNXRUNTIME_LIB_DIR})
+
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -22,14 +41,13 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
-find_package(rclcpp REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(aim_interfaces REQUIRED)
-find_package(cv_bridge REQUIRED)
-find_package(OpenCV REQUIRED)
+
 
 add_executable(detector_node src/detector_node.cpp)
 ament_target_dependencies(detector_node rclcpp sensor_msgs aim_interfaces cv_bridge OpenCV)
+
+target_link_libraries(detector_node ${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so)
+
 install(TARGETS
 	detector_node
 	DESTINATION lib/${PROJECT_NAME})
