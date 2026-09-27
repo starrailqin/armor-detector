@@ -46,10 +46,13 @@ const float NMS_THRESHOLD = 0.45;
 // ============================================================
 // 类别映射：36 类 → 9 类
 // ============================================================
-int mapClassId(int dataset_id) {
-    return dataset_id % 9;
-}
 
+int mapClassId(int dataset_id) {
+    int type_id = dataset_id % 9;
+    // 哨兵输出 7
+    if (type_id == 0) return 7;
+    return type_id;
+}
 // ============================================================
 // 检测结果
 // ============================================================
@@ -162,7 +165,62 @@ private:
             int16_t coord_x = (int16_t)tvec.at<double>(0);
             int16_t coord_y = (int16_t)tvec.at<double>(1);
             int16_t coord_z = (int16_t)tvec.at<double>(2);
+		
+	// ====================================================
+// 坐标变换：相机坐标系 → 机器人坐标系
+// ====================================================
 
+// 1. 把 PnP 的 tvec 转成 cv::Mat
+double cam_x = tvec.at<double>(0);  // 单位：毫米
+double cam_y = tvec.at<double>(1);
+double cam_z = tvec.at<double>(2);
+
+// 2. 转成米（任务给的外参是米）
+cam_x /= 1000.0;
+cam_y /= 1000.0;
+cam_z /= 1000.0;
+
+// 3. 旋转角（度 → 弧度）
+double roll  = 0.0  * CV_PI / 180.0;
+double pitch = 60.0 * CV_PI / 180.0;
+double yaw   = 20.0 * CV_PI / 180.0;
+
+// 4. 计算旋转矩阵 R = Rz(yaw) × Ry(pitch) × Rx(roll)
+cv::Mat Rx = (cv::Mat_<double>(3, 3) <<
+    1, 0, 0,
+    0, cos(roll), -sin(roll),
+    0, sin(roll), cos(roll));
+
+cv::Mat Ry = (cv::Mat_<double>(3, 3) <<
+    cos(pitch), 0, sin(pitch),
+    0, 1, 0,
+    -sin(pitch), 0, cos(pitch));
+
+cv::Mat Rz = (cv::Mat_<double>(3, 3) <<
+    cos(yaw), -sin(yaw), 0,
+    sin(yaw), cos(yaw), 0,
+    0, 0, 1);
+
+cv::Mat R = Rz * Ry * Rx;
+
+// 5. 平移向量（米）
+cv::Mat t = (cv::Mat_<double>(3, 1) << 0.08, 0.0, 0.05);
+
+// 6. 相机坐标（米）
+cv::Mat cam_pos = (cv::Mat_<double>(3, 1) << cam_x, cam_y, cam_z);
+
+// 7. 变换到机器人坐标系
+cv::Mat robot_pos = R * cam_pos + t;
+
+// 8. 转成毫米（任务要求输出 Int16，单位可能是毫米）
+int16_t robot_x = (int16_t)(robot_pos.at<double>(0) * 1000);
+int16_t robot_y = (int16_t)(robot_pos.at<double>(1) * 1000);
+int16_t robot_z = (int16_t)(robot_pos.at<double>(2) * 1000);
+
+// 9. 用机器人坐标替换相机坐标
+coord_x = robot_x;
+coord_y = robot_y;
+coord_z = robot_z;
             // --------------------------------------------------
             // 2.3 发布这个装甲板的 AimInfo
             // --------------------------------------------------
