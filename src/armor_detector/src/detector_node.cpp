@@ -1,7 +1,7 @@
 // ============================================================
 // detector_node.cpp
 // 功能：YOLO 检测装甲板 + 传统视觉找灯条角点 + PnP 定位
-// 输出：所有检测到的装甲板的 AimInfo
+// 输出：所有检测到的装甲板的 AimInfo（机器人坐标系）
 // ============================================================
 
 #include <rclcpp/rclcpp.hpp>
@@ -32,35 +32,36 @@ const double DIST_COEFFS_DATA[5] = {
 // ============================================================
 // 装甲板尺寸（任务给的，单位：毫米）
 // ============================================================
-const float ARMOR_WIDTH = 160.0;
-const float ARMOR_HEIGHT = 80.0;
+const float ARMOR_WIDTH = 160.0;   // 灯条间距 16cm
+const float ARMOR_HEIGHT = 80.0;   // 灯条长度 8cm
 
 // ============================================================
 // YOLO 参数
 // ============================================================
 const int YOLO_INPUT_SIZE = 640;
 const int YOLO_NUM_CLASSES = 36;
-const float CONF_THRESHOLD = 0.5;
+const float CONF_THRESHOLD = 0.2;   // 置信度阈值
 const float NMS_THRESHOLD = 0.45;
 
 // ============================================================
 // 类别映射：36 类 → 9 类
+// 哨兵输出 7
 // ============================================================
-
 int mapClassId(int dataset_id) {
     int type_id = dataset_id % 9;
-    // 哨兵输出 7
+    // 哨兵（0）输出 7
     if (type_id == 0) return 7;
     return type_id;
 }
+
 // ============================================================
 // 检测结果
 // ============================================================
 struct Detection {
     cv::Rect bbox;
     float confidence;
-    int class_id;
-    int dataset_id;
+    int class_id;      // 映射后的任务类别 ID
+    int dataset_id;    // 数据集原始类别 ID
 };
 
 // ============================================================
@@ -75,7 +76,6 @@ public:
             "/sensor_img", 10,
             std::bind(&ArmorDetector::imageCallback, this, std::placeholders::_1));
 
-        // 发布 AimInfo（可以有多个）
         aim_pub_ = this->create_publisher<aim_interfaces::msg::AimInfo>(
             "/aim_target", 10);
 
@@ -132,9 +132,6 @@ private:
 
             // 如果没找到灯条，用 bbox 兜底
             if (image_points.size() != 4) {
-                RCLCPP_WARN(this->get_logger(), "Armor %d: light bar not found, using bbox",
-                            detection_index);
-
                 image_points.clear();
                 image_points.push_back(cv::Point2f(det.bbox.x, det.bbox.y));
                 image_points.push_back(cv::Point2f(det.bbox.x + det.bbox.width, det.bbox.y));
@@ -157,100 +154,130 @@ private:
                                          camera_matrix_, dist_coeffs_,
                                          rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
 
-            if (!success) {
-                RCLCPP_WARN(this->get_logger(), "Armor %d: PnP failed", detection_index);
-                continue;
-            }
+            if (!success) continue;
 
-            int16_t coord_x = (int16_t)tvec.at<double>(0);
-            int16_t coord_y = (int16_t)tvec.at<double>(1);
-            int16_t coord_z = (int16_t)tvec.at<double>(2);
-		
-	// ====================================================
-// 坐标变换：相机坐标系 → 机器人坐标系
-// ====================================================
-
-// 1. 把 PnP 的 tvec 转成 cv::Mat
-double cam_x = tvec.at<double>(0);  // 单位：毫米
-double cam_y = tvec.at<double>(1);
-double cam_z = tvec.at<double>(2);
-
-// 2. 转成米（任务给的外参是米）
-cam_x /= 1000.0;
-cam_y /= 1000.0;
-cam_z /= 1000.0;
-
-// 3. 旋转角（度 → 弧度）
-double roll  = 0.0  * CV_PI / 180.0;
-double pitch = 60.0 * CV_PI / 180.0;
-double yaw   = 20.0 * CV_PI / 180.0;
-
-// 4. 计算旋转矩阵 R = Rz(yaw) × Ry(pitch) × Rx(roll)
-cv::Mat Rx = (cv::Mat_<double>(3, 3) <<
-    1, 0, 0,
-    0, cos(roll), -sin(roll),
-    0, sin(roll), cos(roll));
-
-cv::Mat Ry = (cv::Mat_<double>(3, 3) <<
-    cos(pitch), 0, sin(pitch),
-    0, 1, 0,
-    -sin(pitch), 0, cos(pitch));
-
-cv::Mat Rz = (cv::Mat_<double>(3, 3) <<
-    cos(yaw), -sin(yaw), 0,
-    sin(yaw), cos(yaw), 0,
-    0, 0, 1);
-
-cv::Mat R = Rz * Ry * Rx;
-
-// 5. 平移向量（米）
-cv::Mat t = (cv::Mat_<double>(3, 1) << 0.08, 0.0, 0.05);
-
-// 6. 相机坐标（米）
-cv::Mat cam_pos = (cv::Mat_<double>(3, 1) << cam_x, cam_y, cam_z);
-
-// 7. 变换到机器人坐标系
-cv::Mat robot_pos = R * cam_pos + t;
-
-// 8. 转成毫米（任务要求输出 Int16，单位可能是毫米）
-int16_t robot_x = (int16_t)(robot_pos.at<double>(0) * 1000);
-int16_t robot_y = (int16_t)(robot_pos.at<double>(1) * 1000);
-int16_t robot_z = (int16_t)(robot_pos.at<double>(2) * 1000);
-
-// 9. 用机器人坐标替换相机坐标
-coord_x = robot_x;
-coord_y = robot_y;
-coord_z = robot_z;
             // --------------------------------------------------
-            // 2.3 发布这个装甲板的 AimInfo
+            // 2.3 坐标变换：相机坐标系 → 机器人坐标系
+            // --------------------------------------------------
+            double cam_x = tvec.at<double>(0) / 1000.0;  // mm → m
+            double cam_y = tvec.at<double>(1) / 1000.0;
+            double cam_z = tvec.at<double>(2) / 1000.0;
+
+            // 旋转角（度 → 弧度）
+            double roll  = 0.0  * CV_PI / 180.0;
+            double pitch = 60.0 * CV_PI / 180.0;
+            double yaw   = 20.0 * CV_PI / 180.0;
+
+            // 旋转矩阵
+            cv::Mat Rx = (cv::Mat_<double>(3, 3) <<
+                1, 0, 0,
+                0, cos(roll), -sin(roll),
+                0, sin(roll), cos(roll));
+
+            cv::Mat Ry = (cv::Mat_<double>(3, 3) <<
+                cos(pitch), 0, sin(pitch),
+                0, 1, 0,
+                -sin(pitch), 0, cos(pitch));
+
+            cv::Mat Rz = (cv::Mat_<double>(3, 3) <<
+                cos(yaw), -sin(yaw), 0,
+                sin(yaw), cos(yaw), 0,
+                0, 0, 1);
+
+            cv::Mat R = Rz * Ry * Rx;
+
+            // 平移向量（米）
+            cv::Mat t = (cv::Mat_<double>(3, 1) << 0.08, 0.0, 0.05);
+
+            // 相机坐标（米）
+            cv::Mat cam_pos = (cv::Mat_<double>(3, 1) << cam_x, cam_y, cam_z);
+
+            // 变换到机器人坐标系
+            cv::Mat robot_pos = R * cam_pos + t;
+
+            // 转成毫米
+            int16_t coord_x = (int16_t)(robot_pos.at<double>(0) * 1000);
+            int16_t coord_y = (int16_t)(robot_pos.at<double>(1) * 1000);
+            int16_t coord_z = (int16_t)(robot_pos.at<double>(2) * 1000);
+
+            // --------------------------------------------------
+            // 2.4 发布 AimInfo
             // --------------------------------------------------
             auto aim_msg = aim_interfaces::msg::AimInfo();
             aim_msg.coordinate = {coord_x, coord_y, coord_z};
             aim_msg.type = det.class_id;
             aim_pub_->publish(aim_msg);
 
-            RCLCPP_INFO(this->get_logger(), "Armor %d: type=%d, pos=(%d, %d, %d) mm",
-                        detection_index, det.class_id, coord_x, coord_y, coord_z);
+            RCLCPP_INFO(this->get_logger(), "Armor %d: type=%d, pos=(%d, %d, %d) mm, conf=%.2f",
+                        detection_index, det.class_id, coord_x, coord_y, coord_z, det.confidence);
 
             // --------------------------------------------------
-            // 2.4 画框和角点
+            // 2.5 画框和角点
             // --------------------------------------------------
             cv::rectangle(frame, det.bbox, cv::Scalar(0, 255, 0), 2);
 
-            std::string label = "Type: " + std::to_string(det.class_id) +
-                                " (" + std::to_string((int)(det.confidence * 100)) + "%)";
-            cv::putText(frame, label, cv::Point(det.bbox.x, det.bbox.y - 5),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
-
-            // 画角点
             for (size_t k = 0; k < image_points.size(); k++) {
                 cv::circle(frame, image_points[k], 4, cv::Scalar(0, 0, 255), -1);
             }
 
-            // 画距离
-            std::string dist_label = "Z: " + std::to_string(coord_z) + "mm";
-            cv::putText(frame, dist_label, cv::Point(det.bbox.x, det.bbox.y + det.bbox.height + 20),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 0), 1);
+            // --------------------------------------------------
+            // 2.6 画标注
+            // --------------------------------------------------
+            // 类型名映射
+            std::string type_name;
+            switch (det.class_id) {
+                case 0: type_name = "Sentry";    break;
+                case 1: type_name = "Hero";      break;
+                case 2: type_name = "Engineer";  break;
+                case 3: type_name = "Infantry3"; break;
+                case 4: type_name = "Infantry4"; break;
+                case 5: type_name = "Infantry5"; break;
+                case 6: type_name = "Outpost";   break;
+                case 7: type_name = "BaseBig";   break;
+                case 8: type_name = "BaseSmall"; break;
+                default: type_name = "Unknown";  break;
+            }
+
+            // 构造标注文字
+            std::vector<std::string> lines;
+            lines.push_back("AimInfo[" + std::to_string(detection_index) + "]");
+            lines.push_back("3D Pos: [" + std::to_string(coord_x / 10) + ", " +
+                            std::to_string(coord_y / 10) + ", " +
+                            std::to_string(coord_z / 10) + "]cm");
+            lines.push_back("Type: " + type_name + " (ID:" + std::to_string(det.class_id) + ")");
+            lines.push_back("Conf: " + std::to_string((int)(det.confidence * 100)) + "%");
+
+            // 计算文字位置
+            int line_height = 25;
+            int text_x = det.bbox.x;
+            int text_y = det.bbox.y + det.bbox.height + 10;
+
+            // 计算背景框宽度
+            int max_width = 0;
+            for (const auto& line : lines) {
+                int baseline = 0;
+                cv::Size text_size = cv::getTextSize(line, cv::FONT_HERSHEY_SIMPLEX,
+                                                      0.6, 2, &baseline);
+                max_width = std::max(max_width, text_size.width);
+            }
+
+            // 画半透明背景
+            cv::Mat overlay = frame.clone();
+            cv::rectangle(overlay,
+                          cv::Point(text_x, text_y),
+                          cv::Point(text_x + max_width + 10,
+                                    text_y + line_height * lines.size() + 10),
+                          cv::Scalar(0, 0, 0), -1);
+            double alpha = 0.4;
+            cv::addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame);
+
+            // 画文字
+            for (size_t i = 0; i < lines.size(); i++) {
+                cv::putText(frame, lines[i],
+                            cv::Point(text_x + 5, text_y + line_height * (i + 1)),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                            cv::Scalar(0, 255, 255), 2);
+            }
 
             detection_index++;
         }
@@ -269,7 +296,6 @@ coord_z = robot_z;
     std::vector<cv::Point2f> findLightBarCorners(const cv::Mat& frame, const cv::Rect& bbox) {
         std::vector<cv::Point2f> corners;
 
-        // 1. 裁剪 bbox 区域（稍微扩大一点）
         int margin = 10;
         cv::Rect roi_rect(
             std::max(0, bbox.x - margin),
@@ -279,19 +305,15 @@ coord_z = robot_z;
         );
         cv::Mat roi = frame(roi_rect);
 
-        // 2. 转灰度
         cv::Mat gray;
         cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
 
-        // 3. 二值化
         cv::Mat binary;
         cv::threshold(gray, binary, 200, 255, cv::THRESH_BINARY);
 
-        // 4. 找轮廓
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(binary, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-        // 5. 筛选灯条
         std::vector<cv::RotatedRect> light_bars;
         for (auto& contour : contours) {
             double area = cv::contourArea(contour);
@@ -307,10 +329,8 @@ coord_z = robot_z;
             }
         }
 
-        // 6. 至少需要两个灯条
         if (light_bars.size() < 2) return corners;
 
-        // 7. 按 x 坐标排序
         std::sort(light_bars.begin(), light_bars.end(),
                   [](const cv::RotatedRect& a, const cv::RotatedRect& b) {
                       return a.center.x < b.center.x;
@@ -319,7 +339,6 @@ coord_z = robot_z;
         cv::RotatedRect left_bar = light_bars[0];
         cv::RotatedRect right_bar = light_bars[light_bars.size() - 1];
 
-        // 8. 提取四个角点
         cv::Point2f left_pts[4], right_pts[4];
         left_bar.points(left_pts);
         right_bar.points(right_pts);
