@@ -10,6 +10,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <onnxruntime_cxx_api.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <vector>
 #include <string>
@@ -40,18 +41,33 @@ const float ARMOR_HEIGHT = 80.0;   // 灯条长度 8cm
 // ============================================================
 const int YOLO_INPUT_SIZE = 640;
 const int YOLO_NUM_CLASSES = 36;
-const float CONF_THRESHOLD = 0.2;   // 置信度阈值
+const float CONF_THRESHOLD = 0.2;
 const float NMS_THRESHOLD = 0.45;
 
 // ============================================================
-// 类别映射：36 类 → 9 类
-// 哨兵输出 7
+// 类别映射：36 类 → 9 类（哨兵输出 7）
 // ============================================================
 int mapClassId(int dataset_id) {
     int type_id = dataset_id % 9;
-    // 哨兵（0）输出 7
-    if (type_id == 0) return 7;
+    if (type_id == 0) return 7;   // 哨兵输出 7
     return type_id;
+}
+
+// ============================================================
+// 数据集类别名（36 类）
+// 用于可视化显示完整类别
+// ============================================================
+std::string getDatasetClassName(int dataset_id) {
+    const std::vector<std::string> names = {
+        "B_G",  "B_1",  "B_2",  "B_3",  "B_4",  "B_5",  "B_O",  "B_Bs", "B_Bb",
+        "R_G",  "R_1",  "R_2",  "R_3",  "R_4",  "R_5",  "R_O",  "R_Bs", "R_Bb",
+        "N_G",  "N_1",  "N_2",  "N_3",  "N_4",  "N_5",  "N_O",  "N_Bs", "N_Bb",
+        "P_G",  "P_1",  "P_2",  "P_3",  "P_4",  "P_5",  "P_O",  "P_Bs", "P_Bb"
+    };
+    if (dataset_id >= 0 && dataset_id < (int)names.size()) {
+        return names[dataset_id];
+    }
+    return "Unknown";
 }
 
 // ============================================================
@@ -85,7 +101,13 @@ public:
         camera_matrix_ = cv::Mat(3, 3, CV_64F, (void*)CAMERA_MATRIX_DATA).clone();
         dist_coeffs_ = cv::Mat(1, 5, CV_64F, (void*)DIST_COEFFS_DATA).clone();
 
-        std::string model_path = "/home/keyis123456/armor_ws/src/armor_detector/best.onnx";
+        // ====================================================
+        // 用 ament_index 查找包路径，拼接 ONNX 模型路径
+        // ====================================================
+        std::string pkg_path = ament_index_cpp::get_package_share_directory("armor_detector");
+        std::string model_path = pkg_path + "/best.onnx";
+
+        RCLCPP_INFO(this->get_logger(), "Model path: %s", model_path.c_str());
 
         Ort::SessionOptions session_options;
         session_options.SetIntraOpNumThreads(1);
@@ -97,7 +119,7 @@ public:
         input_name_ = session_->GetInputNameAllocated(0, allocator).get();
         output_name_ = session_->GetOutputNameAllocated(0, allocator).get();
 
-        RCLCPP_INFO(this->get_logger(), "YOLO model loaded: %s", model_path.c_str());
+        RCLCPP_INFO(this->get_logger(), "YOLO model loaded");
     }
 
 private:
@@ -123,14 +145,12 @@ private:
         // 2. 遍历所有检测结果，每个都做 PnP
         // ====================================================
         int detection_index = 0;
+        bool found_any = false;
 
         for (const auto& det : detections) {
-            // --------------------------------------------------
             // 2.1 找灯条角点
-            // --------------------------------------------------
             std::vector<cv::Point2f> image_points = findLightBarCorners(frame, det.bbox);
 
-            // 如果没找到灯条，用 bbox 兜底
             if (image_points.size() != 4) {
                 image_points.clear();
                 image_points.push_back(cv::Point2f(det.bbox.x, det.bbox.y));
@@ -140,9 +160,7 @@ private:
                 image_points.push_back(cv::Point2f(det.bbox.x, det.bbox.y + det.bbox.height));
             }
 
-            // --------------------------------------------------
             // 2.2 PnP 解算
-            // --------------------------------------------------
             std::vector<cv::Point3f> object_points;
             object_points.push_back(cv::Point3f(-ARMOR_WIDTH/2, -ARMOR_HEIGHT/2, 0));
             object_points.push_back(cv::Point3f( ARMOR_WIDTH/2, -ARMOR_HEIGHT/2, 0));
@@ -156,19 +174,15 @@ private:
 
             if (!success) continue;
 
-            // --------------------------------------------------
-            // 2.3 坐标变换：相机坐标系 → 机器人坐标系
-            // --------------------------------------------------
-            double cam_x = tvec.at<double>(0) / 1000.0;  // mm → m
+            // 2.3 坐标变换：相机 → 机器人
+            double cam_x = tvec.at<double>(0) / 1000.0;
             double cam_y = tvec.at<double>(1) / 1000.0;
             double cam_z = tvec.at<double>(2) / 1000.0;
 
-            // 旋转角（度 → 弧度）
             double roll  = 0.0  * CV_PI / 180.0;
             double pitch = 60.0 * CV_PI / 180.0;
             double yaw   = 20.0 * CV_PI / 180.0;
 
-            // 旋转矩阵
             cv::Mat Rx = (cv::Mat_<double>(3, 3) <<
                 1, 0, 0,
                 0, cos(roll), -sin(roll),
@@ -186,23 +200,15 @@ private:
 
             cv::Mat R = Rz * Ry * Rx;
 
-            // 平移向量（米）
             cv::Mat t = (cv::Mat_<double>(3, 1) << 0.08, 0.0, 0.05);
-
-            // 相机坐标（米）
             cv::Mat cam_pos = (cv::Mat_<double>(3, 1) << cam_x, cam_y, cam_z);
-
-            // 变换到机器人坐标系
             cv::Mat robot_pos = R * cam_pos + t;
 
-            // 转成毫米
             int16_t coord_x = (int16_t)(robot_pos.at<double>(0) * 1000);
             int16_t coord_y = (int16_t)(robot_pos.at<double>(1) * 1000);
             int16_t coord_z = (int16_t)(robot_pos.at<double>(2) * 1000);
 
-            // --------------------------------------------------
             // 2.4 发布 AimInfo
-            // --------------------------------------------------
             auto aim_msg = aim_interfaces::msg::AimInfo();
             aim_msg.coordinate = {coord_x, coord_y, coord_z};
             aim_msg.type = det.class_id;
@@ -211,48 +217,29 @@ private:
             RCLCPP_INFO(this->get_logger(), "Armor %d: type=%d, pos=(%d, %d, %d) mm, conf=%.2f",
                         detection_index, det.class_id, coord_x, coord_y, coord_z, det.confidence);
 
-            // --------------------------------------------------
             // 2.5 画框和角点
-            // --------------------------------------------------
             cv::rectangle(frame, det.bbox, cv::Scalar(0, 255, 0), 2);
 
             for (size_t k = 0; k < image_points.size(); k++) {
                 cv::circle(frame, image_points[k], 4, cv::Scalar(0, 0, 255), -1);
             }
 
-            // --------------------------------------------------
-            // 2.6 画标注
-            // --------------------------------------------------
-            // 类型名映射
-            std::string type_name;
-            switch (det.class_id) {
-                case 0: type_name = "Sentry";    break;
-                case 1: type_name = "Hero";      break;
-                case 2: type_name = "Engineer";  break;
-                case 3: type_name = "Infantry3"; break;
-                case 4: type_name = "Infantry4"; break;
-                case 5: type_name = "Infantry5"; break;
-                case 6: type_name = "Outpost";   break;
-                case 7: type_name = "BaseBig";   break;
-                case 8: type_name = "BaseSmall"; break;
-                default: type_name = "Unknown";  break;
-            }
+            // 2.6 画标注（显示完整类别）
+            std::string type_name = getDatasetClassName(det.dataset_id);
 
-            // 构造标注文字
             std::vector<std::string> lines;
             lines.push_back("AimInfo[" + std::to_string(detection_index) + "]");
             lines.push_back("3D Pos: [" + std::to_string(coord_x / 10) + ", " +
                             std::to_string(coord_y / 10) + ", " +
                             std::to_string(coord_z / 10) + "]cm");
-            lines.push_back("Type: " + type_name + " (ID:" + std::to_string(det.class_id) + ")");
+            lines.push_back("Type: " + type_name +
+                            " (ID:" + std::to_string(det.dataset_id) + ")");
             lines.push_back("Conf: " + std::to_string((int)(det.confidence * 100)) + "%");
 
-            // 计算文字位置
             int line_height = 25;
             int text_x = det.bbox.x;
             int text_y = det.bbox.y + det.bbox.height + 10;
 
-            // 计算背景框宽度
             int max_width = 0;
             for (const auto& line : lines) {
                 int baseline = 0;
@@ -261,7 +248,7 @@ private:
                 max_width = std::max(max_width, text_size.width);
             }
 
-            // 画半透明背景
+            // 半透明背景
             cv::Mat overlay = frame.clone();
             cv::rectangle(overlay,
                           cv::Point(text_x, text_y),
@@ -279,11 +266,23 @@ private:
                             cv::Scalar(0, 255, 255), 2);
             }
 
+            found_any = true;
             detection_index++;
         }
 
         // ====================================================
-        // 3. 发布可视化图像
+        // 3. 如果没检测到，发一个默认消息
+        // ====================================================
+        if (!found_any) {
+            auto aim_msg = aim_interfaces::msg::AimInfo();
+            aim_msg.coordinate = {0, 0, 0};
+            aim_msg.type = -1;
+            aim_pub_->publish(aim_msg);
+            RCLCPP_INFO(this->get_logger(), "No armor detected, published empty AimInfo");
+        }
+
+        // ====================================================
+        // 4. 发布可视化图像
         // ====================================================
         sensor_msgs::msg::Image::SharedPtr vis_msg =
             cv_bridge::CvImage(msg->header, "bgr8", frame).toImageMsg();
@@ -415,6 +414,7 @@ private:
         std::vector<cv::Rect> boxes;
         std::vector<float> confidences;
         std::vector<int> class_ids;
+        std::vector<int> dataset_ids;
 
         for (int i = 0; i < num_boxes; i++) {
             float cx = output_data[0 * num_boxes + i];
@@ -442,6 +442,7 @@ private:
             boxes.push_back(cv::Rect((int)x, (int)y, (int)rw, (int)rh));
             confidences.push_back(max_score);
             class_ids.push_back(mapClassId(max_id));
+            dataset_ids.push_back(max_id);
         }
 
         std::vector<int> indices;
@@ -452,6 +453,7 @@ private:
             det.bbox = boxes[idx];
             det.confidence = confidences[idx];
             det.class_id = class_ids[idx];
+            det.dataset_id = dataset_ids[idx];
             detections.push_back(det);
         }
 

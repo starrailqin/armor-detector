@@ -12,6 +12,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(aim_interfaces REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
@@ -51,5 +52,8 @@ target_link_libraries(detector_node ${ONNXRUNTIME_LIB_DIR}/libonnxruntime.so)
 install(TARGETS
 	detector_node
 	DESTINATION lib/${PROJECT_NAME})
+install(FILES best.onnx
+    DESTINATION share/${PROJECT_NAME})
+
 ament_package()
 
