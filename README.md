@@ -26,7 +26,7 @@ RoboMaster 装甲板检测与定位 ROS2 节点。
 colcon build
 source install/setup.bash
 ```
-##运行
+## 运行
 ros2 run armor_detector detector_node
 
 ```bash
@@ -34,7 +34,7 @@ ros2 run armor_detector detector_node
 ```
 
 
-##消息定义
+## 消息定义
 int16[] coordinate  # 机器人坐标系下的坐标（毫米）
 int16 type          # 装甲板图案类型（哨兵输出 7）
 
