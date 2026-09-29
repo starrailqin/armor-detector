@@ -2,15 +2,17 @@
 
 RoboMaster 装甲板检测与定位 ROS2 节点。
 
+
 ## 功能
 
 - 订阅 `/sensor_img` 图像话题
-- YOLO 检测装甲板
-- 传统视觉精修角点
+- YOLOv8 检测装甲板
+- 传统视觉精修灯条角点
 - PnP 解算 3D 坐标
 - 坐标变换（相机 → 机器人）
 - 发布 `/aim_target`（自定义消息 `AimInfo`）
 - 发布可视化图像到 `/armor_debug_image`
+- 未检测到装甲板时，发布空消息（`type = -1`）
 
 ## 依赖
 
@@ -20,15 +22,19 @@ RoboMaster 装甲板检测与定位 ROS2 节点。
 - Ultralytics YOLOv8
 
 ## 编译
-
 ```bash
 colcon build
 source install/setup.bash
-
-#运行
+```
+##运行
 ros2 run armor_detector detector_node
 
-#消息定义
+```bash
+ros2 run armor_detector detector_node
+```
+
+
+##消息定义
 int16[] coordinate  # 机器人坐标系下的坐标（毫米）
 int16 type          # 装甲板图案类型（哨兵输出 7）
 
